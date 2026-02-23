@@ -1,18 +1,52 @@
 import { useEffect, useRef, useState } from 'react';
 import io from 'socket.io-client';
 
-// SUBSTITUA PELO SEU LINK DA PORTA 3001 (DEVE SER HTTPS)
+// Ajuste para o seu link do servidor de sinalização (Porta 3001)
 const socket = io('https://reimagined-fishstick-4jrwj7g6w4q42q47p-3001.app.github.dev');
 
 export default function App() {
   const [inCall, setInCall] = useState(false);
+  const [devices, setDevices] = useState([]);
+  const [selectedDevice, setSelectedDevice] = useState('');
+  const [status, setStatus] = useState({ type: 'info', msg: 'Aguardando detecção...' });
+  
   const localVideo = useRef();
   const remoteVideo = useRef();
   const pc = useRef(new RTCPeerConnection({
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
   }));
 
+  const detectCameras = async () => {
+    try {
+      setStatus({ type: 'info', msg: 'Acessando hardware...' });
+      
+      // Solicita apenas vídeo (audio: false é crucial para câmeras de inspeção)
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      
+      const allDevices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = allDevices.filter(d => d.kind === 'videoinput');
+      
+      setDevices(videoInputs);
+      if (videoInputs.length > 0 && !selectedDevice) {
+        setSelectedDevice(videoInputs[0].deviceId);
+      }
+
+      // Libera a câmera imediatamente após listar
+      stream.getTracks().forEach(track => track.stop());
+      setStatus({ type: 'success', msg: 'Câmeras prontas.' });
+    } catch (err) {
+      console.error(err);
+      if (err.name === 'NotReadableError') {
+        setStatus({ type: 'error', msg: 'Câmera ocupada. Feche o preview do Chrome ou outros apps.' });
+      } else {
+        setStatus({ type: 'error', msg: `Erro: ${err.name}` });
+      }
+    }
+  };
+
   useEffect(() => {
+    detectCameras();
+
     socket.on('user-joined', async () => {
       const offer = await pc.current.createOffer();
       await pc.current.setLocalDescription(offer);
@@ -37,92 +71,84 @@ export default function App() {
     };
 
     pc.current.ontrack = (e) => {
-      remoteVideo.current.srcObject = e.streams[0];
+      if (remoteVideo.current) remoteVideo.current.srcObject = e.streams[0];
     };
   }, []);
 
   const startCall = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    localVideo.current.srcObject = stream;
-    stream.getTracks().forEach(track => pc.current.addTrack(track, stream));
-    socket.emit('join-room', 'sala-1');
-    setInCall(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: selectedDevice } },
+        audio: false
+      });
+      
+      localVideo.current.srcObject = stream;
+      stream.getTracks().forEach(track => pc.current.addTrack(track, stream));
+      socket.emit('join-room', 'sala-1');
+      setInCall(true);
+      setStatus({ type: 'success', msg: 'Transmissão ativa.' });
+    } catch (err) {
+      setStatus({ type: 'error', msg: 'Falha ao iniciar. Verifique se a câmera foi desconectada.' });
+    }
   };
 
   return (
-    <div className="min-h-screen bg-[#0f172a] text-slate-200 font-sans selection:bg-blue-500/30">
-      {/* Background Decorativo */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-[10%] -left-[10%] w-[40%] h-[40%] bg-blue-600/10 blur-[120px] rounded-full"></div>
-        <div className="absolute -bottom-[10%] -right-[10%] w-[40%] h-[40%] bg-emerald-600/10 blur-[120px] rounded-full"></div>
-      </div>
-
-      <main className="relative z-10 container mx-auto px-6 py-12 flex flex-col items-center">
-        {/* Header Profissional */}
-        <header className="mb-12 text-center">
-          <div className="inline-block px-4 py-1.5 mb-4 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-bold uppercase tracking-widest">
-            Sistema de Alta Performance
+    <div className="min-h-screen bg-[#0f172a] text-slate-200 font-sans">
+      <main className="container mx-auto px-6 py-12 flex flex-col items-center">
+        <header className="mb-10 text-center">
+          <h1 className="text-4xl font-black text-white mb-2">Digital <span className="text-blue-500">Connect</span></h1>
+          <p className="text-slate-500 text-xs font-bold uppercase tracking-[0.3em]">Industrial Inspection System</p>
+          
+          <div className="mt-8 bg-slate-900/50 p-6 rounded-2xl border border-white/5 backdrop-blur-sm">
+            <p className="text-[10px] uppercase font-bold text-blue-400 mb-4 tracking-widest">Configuração de Hardware</p>
+            <div className="flex flex-wrap justify-center gap-4">
+              <select 
+                value={selectedDevice}
+                onChange={(e) => setSelectedDevice(e.target.value)}
+                className="bg-slate-950 border border-white/10 rounded-lg px-4 py-2 text-sm outline-none focus:border-blue-500 min-w-[200px]"
+              >
+                {devices.length === 0 ? (
+                  <option>Nenhuma câmera...</option>
+                ) : (
+                  devices.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>{d.label || 'Câmera Externa'}</option>
+                  ))
+                )}
+              </select>
+              <button onClick={detectCameras} className="bg-white/5 hover:bg-white/10 p-2 rounded-lg border border-white/10 transition-all">🔄</button>
+            </div>
+            <p className={`mt-4 text-[10px] font-mono ${status.type === 'error' ? 'text-rose-400' : 'text-emerald-400'}`}>
+              {status.msg}
+            </p>
           </div>
-          <h1 className="text-5xl font-black tracking-tight text-white mb-4">
-            Digital <span className="text-blue-500">Connect</span>
-          </h1>
-          <p className="text-slate-400 max-w-md mx-auto">
-            Engenharia de conexão em tempo real com protocolo WebRTC avançado.
-          </p>
         </header>
 
-        {/* Grid de Vídeos Lado a Lado */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full max-w-6xl h-full">
-          {/* Vídeo Local */}
-          <div className="relative group rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl overflow-hidden shadow-2xl transition-all duration-500 hover:border-blue-500/50">
-            <video ref={localVideo} autoPlay playsInline muted className="w-full h-full aspect-video object-cover" />
-            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-60"></div>
-            <div className="absolute bottom-6 left-6 flex items-center gap-3">
-              <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
-              <span className="text-sm font-semibold tracking-wide">Você (Local)</span>
-            </div>
-            {!inCall && (
-              <div className="absolute inset-0 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
-                <p className="text-slate-400 text-sm">Câmera desligada</p>
-              </div>
-            )}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-5xl">
+          <div className="bg-black rounded-3xl border border-white/10 overflow-hidden aspect-video relative">
+            <video ref={localVideo} autoPlay playsInline muted className="w-full h-full object-cover" />
+            <span className="absolute top-4 left-4 text-[9px] bg-blue-600 px-2 py-1 rounded font-bold">LOCAL / INSPEÇÃO</span>
           </div>
-
-          {/* Vídeo Remoto */}
-          <div className="relative group rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl overflow-hidden shadow-2xl transition-all duration-500 hover:border-emerald-500/50">
-            <video ref={remoteVideo} autoPlay playsInline className="w-full h-full aspect-video object-cover" />
-            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-60"></div>
-            <div className="absolute bottom-6 left-6 flex items-center gap-3">
-              <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
-              <span className="text-sm font-semibold tracking-wide">Remoto (Conectado)</span>
-            </div>
+          <div className="bg-black rounded-3xl border border-white/10 overflow-hidden aspect-video relative">
+            <video ref={remoteVideo} autoPlay playsInline className="w-full h-full object-cover" />
+            <span className="absolute top-4 left-4 text-[9px] bg-emerald-600 px-2 py-1 rounded font-bold">REMOTO / MONITOR</span>
           </div>
         </div>
 
-        {/* Controles Inferiores */}
-        <div className="mt-16 flex items-center gap-6">
+        <div className="mt-12">
           {!inCall ? (
             <button 
               onClick={startCall}
-              className="group relative px-12 py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold text-lg transition-all duration-300 shadow-[0_0_40px_rgba(37,99,235,0.3)] active:scale-95"
+              disabled={devices.length === 0}
+              className="px-12 py-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed text-white rounded-xl font-bold transition-all shadow-lg"
             >
-              Iniciar Reunião
-              <div className="absolute inset-0 rounded-2xl border-2 border-white/20 scale-105 opacity-0 group-hover:opacity-100 transition-all"></div>
+              INICIAR TRANSMISSÃO
             </button>
           ) : (
-            <button 
-              onClick={() => window.location.reload()}
-              className="px-12 py-4 bg-rose-600/10 hover:bg-rose-600 border border-rose-600/20 text-rose-500 hover:text-white rounded-2xl font-bold text-lg transition-all duration-300 active:scale-95"
-            >
-              Encerrar Chamada
+            <button onClick={() => window.location.reload()} className="px-12 py-4 bg-rose-600/20 hover:bg-rose-600 text-rose-500 hover:text-white border border-rose-600/30 rounded-xl font-bold transition-all">
+              DESCONECTAR
             </button>
           )}
         </div>
-
-        {/* Footer Técnico */}
-        <footer className="mt-20 text-slate-500 text-[10px] uppercase tracking-[0.2em]">
-          Powered by WebRTC Engine • P2P Optimized Connection
-        </footer>
       </main>
     </div>
   );

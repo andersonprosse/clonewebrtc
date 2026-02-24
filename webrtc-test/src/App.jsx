@@ -1,51 +1,29 @@
 import { useEffect, useRef, useState } from 'react';
 import io from 'socket.io-client';
 
-// Ajuste para o seu link do servidor de sinalização (Porta 3001)
-const socket = io('https://reimagined-fishstick-4jrwj7g6w4q42q47p-3001.app.github.dev');
+// Substitua o bloco antigo por este:
+const socket = io('https://webrtc-signaling-server.onrender.com', {
+  transports: ['websocket'], // Mantemos isso para evitar erros de conexão inicial
+  upgrade: false
+});
 
 export default function App() {
   const [inCall, setInCall] = useState(false);
-  const [devices, setDevices] = useState([]);
-  const [selectedDevice, setSelectedDevice] = useState('');
-  const [status, setStatus] = useState({ type: 'info', msg: 'Aguardando detecção...' });
+  const [bridgeIp, setBridgeIp] = useState("192.168.0.XX:8081"); 
+  const [auth, setAuth] = useState("admin:1234");
+  const [status, setStatus] = useState({ type: 'info', msg: 'Aguardando configuração da Ponte IP...' });
   
   const localVideo = useRef();
   const remoteVideo = useRef();
+  const canvasRef = useRef(document.createElement("canvas"));
+  const requestRef = useRef();
   const pc = useRef(new RTCPeerConnection({
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
   }));
 
-  const detectCameras = async () => {
-    try {
-      setStatus({ type: 'info', msg: 'Acessando hardware...' });
-      
-      // Solicita apenas vídeo (audio: false é crucial para câmeras de inspeção)
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      
-      const allDevices = await navigator.mediaDevices.enumerateDevices();
-      const videoInputs = allDevices.filter(d => d.kind === 'videoinput');
-      
-      setDevices(videoInputs);
-      if (videoInputs.length > 0 && !selectedDevice) {
-        setSelectedDevice(videoInputs[0].deviceId);
-      }
-
-      // Libera a câmera imediatamente após listar
-      stream.getTracks().forEach(track => track.stop());
-      setStatus({ type: 'success', msg: 'Câmeras prontas.' });
-    } catch (err) {
-      console.error(err);
-      if (err.name === 'NotReadableError') {
-        setStatus({ type: 'error', msg: 'Câmera ocupada. Feche o preview do Chrome ou outros apps.' });
-      } else {
-        setStatus({ type: 'error', msg: `Erro: ${err.name}` });
-      }
-    }
-  };
-
   useEffect(() => {
-    detectCameras();
+    socket.on('connect', () => setStatus({ type: 'success', msg: 'Conectado ao servidor de sinalização!' }));
+    socket.on('connect_error', () => setStatus({ type: 'error', msg: 'Erro de conexão com o servidor (CORS/Porta).' }));
 
     socket.on('user-joined', async () => {
       const offer = await pc.current.createOffer();
@@ -73,81 +51,91 @@ export default function App() {
     pc.current.ontrack = (e) => {
       if (remoteVideo.current) remoteVideo.current.srcObject = e.streams[0];
     };
+
+    return () => {
+      cancelAnimationFrame(requestRef.current);
+      socket.off();
+    };
   }, []);
 
-  const startCall = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: selectedDevice } },
-        audio: false
-      });
-      
+  const startCall = () => {
+    setStatus({ type: 'info', msg: 'Iniciando captura da Ponte IP...' });
+    
+    // Formata a URL da câmera (HTTP)
+    const bridgeUrl = `http://${auth}@${bridgeIp}/video`;
+    
+    const img = new Image();
+    // Removido crossOrigin para evitar erros em rede local HTTP
+    img.src = bridgeUrl;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    canvas.width = 640; 
+    canvas.height = 480;
+
+    const renderLoop = () => {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      requestRef.current = requestAnimationFrame(renderLoop);
+    };
+
+    img.onload = () => {
+      renderLoop();
+      // Captura o sinal (15 FPS é ideal para o J7 Prime não esquentar)
+      const stream = canvas.captureStream(15);
       localVideo.current.srcObject = stream;
+      
       stream.getTracks().forEach(track => pc.current.addTrack(track, stream));
       socket.emit('join-room', 'sala-1');
       setInCall(true);
-      setStatus({ type: 'success', msg: 'Transmissão ativa.' });
-    } catch (err) {
-      setStatus({ type: 'error', msg: 'Falha ao iniciar. Verifique se a câmera foi desconectada.' });
-    }
+      setStatus({ type: 'success', msg: 'Transmissão ativa!' });
+    };
+
+    img.onerror = () => {
+      setStatus({ type: 'error', msg: 'Falha na imagem. Ative "Conteúdo Inseguro" no cadeado do navegador.' });
+    };
   };
 
   return (
-    <div className="min-h-screen bg-[#0f172a] text-slate-200 font-sans">
-      <main className="container mx-auto px-6 py-12 flex flex-col items-center">
-        <header className="mb-10 text-center">
-          <h1 className="text-4xl font-black text-white mb-2">Digital <span className="text-blue-500">Connect</span></h1>
-          <p className="text-slate-500 text-xs font-bold uppercase tracking-[0.3em]">Industrial Inspection System</p>
-          
-          <div className="mt-8 bg-slate-900/50 p-6 rounded-2xl border border-white/5 backdrop-blur-sm">
-            <p className="text-[10px] uppercase font-bold text-blue-400 mb-4 tracking-widest">Configuração de Hardware</p>
-            <div className="flex flex-wrap justify-center gap-4">
-              <select 
-                value={selectedDevice}
-                onChange={(e) => setSelectedDevice(e.target.value)}
-                className="bg-slate-950 border border-white/10 rounded-lg px-4 py-2 text-sm outline-none focus:border-blue-500 min-w-[200px]"
-              >
-                {devices.length === 0 ? (
-                  <option>Nenhuma câmera...</option>
-                ) : (
-                  devices.map((d) => (
-                    <option key={d.deviceId} value={d.deviceId}>{d.label || 'Câmera Externa'}</option>
-                  ))
-                )}
-              </select>
-              <button onClick={detectCameras} className="bg-white/5 hover:bg-white/10 p-2 rounded-lg border border-white/10 transition-all">🔄</button>
+    <div className="min-h-screen bg-[#0f172a] text-slate-200 p-6">
+      <main className="container mx-auto max-w-4xl flex flex-col items-center">
+        <h1 className="text-3xl font-black mb-8 text-white text-center">
+          Digital <span className="text-blue-500">Connect</span> BRIDGE
+        </h1>
+
+        {!inCall && (
+          <div className="bg-slate-900/80 p-6 rounded-2xl border border-white/10 mb-8 w-full max-w-md">
+            <div className="space-y-4">
+              <input 
+                className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm outline-none focus:border-blue-500"
+                placeholder="IP (Ex: 192.168.0.15:8081)"
+                value={bridgeIp}
+                onChange={(e) => setBridgeIp(e.target.value)}
+              />
+              <input 
+                className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm outline-none focus:border-blue-500"
+                placeholder="Usuário:Senha (Ex: admin:1234)"
+                value={auth}
+                onChange={(e) => setAuth(e.target.value)}
+              />
+              <button onClick={startCall} className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-xl font-bold shadow-lg transition-all">
+                CONECTAR AO GATEWAY
+              </button>
             </div>
-            <p className={`mt-4 text-[10px] font-mono ${status.type === 'error' ? 'text-rose-400' : 'text-emerald-400'}`}>
+            <p className={`mt-4 text-[10px] text-center font-mono ${status.type === 'error' ? 'text-rose-400' : 'text-emerald-400'}`}>
               {status.msg}
             </p>
           </div>
-        </header>
+        )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-5xl">
-          <div className="bg-black rounded-3xl border border-white/10 overflow-hidden aspect-video relative">
-            <video ref={localVideo} autoPlay playsInline muted className="w-full h-full object-cover" />
-            <span className="absolute top-4 left-4 text-[9px] bg-blue-600 px-2 py-1 rounded font-bold">LOCAL / INSPEÇÃO</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full">
+          <div className="bg-black rounded-3xl border border-white/10 overflow-hidden aspect-video relative shadow-2xl">
+            <video ref={localVideo} autoPlay playsInline muted className="w-full h-full object-contain" />
+            <span className="absolute bottom-4 left-4 text-[9px] bg-blue-600 px-2 py-1 rounded font-bold">FONTE: J7 BRIDGE</span>
           </div>
-          <div className="bg-black rounded-3xl border border-white/10 overflow-hidden aspect-video relative">
-            <video ref={remoteVideo} autoPlay playsInline className="w-full h-full object-cover" />
-            <span className="absolute top-4 left-4 text-[9px] bg-emerald-600 px-2 py-1 rounded font-bold">REMOTO / MONITOR</span>
+          <div className="bg-black rounded-3xl border border-white/10 overflow-hidden aspect-video relative shadow-2xl">
+            <video ref={remoteVideo} autoPlay playsInline className="w-full h-full object-contain" />
+            <span className="absolute bottom-4 left-4 text-[9px] bg-emerald-600 px-2 py-1 rounded font-bold">MONITOR REMOTO</span>
           </div>
-        </div>
-
-        <div className="mt-12">
-          {!inCall ? (
-            <button 
-              onClick={startCall}
-              disabled={devices.length === 0}
-              className="px-12 py-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed text-white rounded-xl font-bold transition-all shadow-lg"
-            >
-              INICIAR TRANSMISSÃO
-            </button>
-          ) : (
-            <button onClick={() => window.location.reload()} className="px-12 py-4 bg-rose-600/20 hover:bg-rose-600 text-rose-500 hover:text-white border border-rose-600/30 rounded-xl font-bold transition-all">
-              DESCONECTAR
-            </button>
-          )}
         </div>
       </main>
     </div>
